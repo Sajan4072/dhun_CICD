@@ -1,0 +1,227 @@
+stages:
+  - prebuild_dev
+  - test_dev
+  - build_dev
+  - deploy_dev
+  - prebuild_prod
+  - test_prod
+  - build_prod
+  - deploy_prod
+
+variables:
+    IMAGE_NAME: app_cicd
+    TEST_IMAGE_NAME: app_cicd_test
+    IMAGE_VERSION: ${CI_COMMIT_SHORT_SHA}
+    IMAGE_TAG: registry.gitlab.com/${CI_PROJECT_NAMESPACE}/${CI_PROJECT_NAME}
+    PIPELINE_RUNNER_TAG: final-runner
+    GKE_CLUSTER_NAME: cicd
+    GKE_CLUSTER_ZONE: us-south1-c
+    GKE_PROJECT_ID: ${GKE_PROJECT_ID}
+    DEV_KUBE_NAMESPACE: default
+    PROD_KUBE_NAMESPACE: prod
+    STAGING_KUBE_NAMESPACE: staging
+
+
+build_test_dev:
+    stage: prebuild_dev
+    tags:
+      - ${PIPELINE_RUNNER_TAG}
+    only:
+      - main  # Ensures the job runs only on the main branch
+
+    before_script:
+      - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+    script:
+      - rm .dockerignore
+      - docker build -t ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION} -f Dockerfile .
+    after_script:
+      - docker rmi ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION}
+      - rm -f /home/gitlab-runner/.docker/config.json
+
+
+
+
+test_app_dev:
+  stage: test_dev
+  needs:
+    - build_test_dev
+  tags:
+    - ${PIPELINE_RUNNER_TAG}
+  only:
+    - main
+
+  before_script:
+    - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+
+  script:
+    - docker-compose up -e DB_NAME=${DB_NAME} -e DB_USER=${DB_USER} -e DB_PASSWORD=${DB_PASSWORD} -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} -e INSTANCE_ID=${INSTANCE_ID} -f docker-compose-test.yaml
+#    - docker compose up -f docker-compose-test.yaml
+
+  after_script:
+    - docker-compose down
+    - rm -f /home/gitlab-runner/.docker/config.json
+  allow_failure: false  # Fail the pipeline if tests fail
+
+
+
+build-base-dev:
+    stage: build_dev
+    needs:
+      - test_app_dev
+    tags:
+      - ${PIPELINE_RUNNER_TAG}
+    only:
+      - main
+
+    before_script:
+      # Write the GCLOUD_SERVICE_KEY to a directory with sufficient permissions
+      - echo "$GCLOUD_SERVICE_KEY" > /home/gitlab-runner/gcloud-service-key.json
+      # Authenticate with Google Cloud using the key file
+      - gcloud auth activate-service-account --key-file=/home/gitlab-runner/gcloud-service-key.json
+      # Configure Docker to use gcloud for authentication
+      - gcloud auth configure-docker gcr.io
+    script:
+        # The following command creates the docker image
+        - docker build -t ${IMAGE_NAME}:${IMAGE_VERSION} -f Dockerfile .
+
+      # Push the image to GKE's container registry if not already pushed
+        - docker tag ${IMAGE_NAME}:${IMAGE_VERSION} gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+        - docker push gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+
+        #remove the image after push to artifact registry
+        - docker rmi ${IMAGE_NAME}:${IMAGE_VERSION}
+        - docker rmi gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+    after_script:
+      # Recommended: Remove the image after push to artifact registry
+      - docker rmi ${IMAGE_NAME}:${IMAGE_VERSION}
+      - docker rmi gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+      - rm -f /home/gitlab-runner/.docker/config.json
+
+
+deploy_app_dev:
+  stage: deploy_dev
+  needs: [build-base-dev]
+  tags:
+    - ${PIPELINE_RUNNER_TAG}
+  only:
+    - main
+  image: google/cloud-sdk:alpine
+  before_script:
+    # Decode and configure the GCloud service key
+    - echo $GCLOUD_SERVICE_KEY > ${CI_PROJECT_DIR}/gcloud-service-key.json
+    - gcloud auth activate-service-account --key-file=${CI_PROJECT_DIR}/gcloud-service-key.json
+    - gcloud config set project ${GKE_PROJECT_ID}
+
+    # Fetch GKE credentials
+    - gcloud container clusters get-credentials ${GKE_CLUSTER_NAME} --zone ${GKE_CLUSTER_ZONE} --project ${GKE_PROJECT_ID}
+  script:
+    - kubectl apply -f ${CI_PROJECT_DIR}/deployment/secrets.yaml -n ${DEV_KUBE_NAMESPACE}
+    # Replace the placeholder with the actual image tag
+    - sed -i "s|IMAGE_VERSION|${CI_COMMIT_SHORT_SHA}|g" ${CI_PROJECT_DIR}/deployment/deployment.yaml; kubectl apply -f ${CI_PROJECT_DIR}/deployment/deployment.yaml -n ${DEV_KUBE_NAMESPACE}
+
+  after_script:
+    - rm -f ${CI_PROJECT_DIR}/gcloud-service-key.json
+
+
+
+
+######
+build_test_prod:
+    stage: prebuild_prod
+    tags:
+      - ${PIPELINE_RUNNER_TAG}
+    only:
+      - prod  # Ensures the job runs only on the main branch
+
+    before_script:
+      - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+    script:
+      - rm .dockerignore
+      - docker build -t ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION} -f DockerfileProd .
+    after_script:
+      - docker rmi ${IMAGE_TAG}/${TEST_IMAGE_NAME}:${IMAGE_VERSION}
+      - rm -f /home/gitlab-runner/.docker/config.json
+
+
+
+
+test_app_prod:
+  stage: test_prod
+  needs:
+    - build_test_prod
+  tags:
+    - ${PIPELINE_RUNNER_TAG}
+  only:
+    - prod
+
+  before_script:
+    - docker login -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD} ${CI_REGISTRY}
+
+  script:
+    - docker-compose up -e DB_NAME=${DB_NAME} -e DB_USER=${DB_USER} -e DB_PASSWORD=${DB_PASSWORD} -e DB_HOST=${DB_HOST} -e DB_PORT=${DB_PORT} -e INSTANCE_ID=${INSTANCE_ID} -f docker-compose-test-prod.yaml
+#    - docker compose up -f docker-compose-test.yaml
+
+  after_script:
+    - docker-compose down
+    - rm -f /home/gitlab-runner/.docker/config.json
+  allow_failure: false  # Fail the pipeline if tests fail
+
+
+
+build-base-prod:
+    stage: build_prod
+    needs:
+      - test_app_prod
+    tags:
+      - ${PIPELINE_RUNNER_TAG}
+    only:
+      - prod
+
+    before_script:
+      # Write the GCLOUD_SERVICE_KEY to a directory with sufficient permissions
+      - echo "$GCLOUD_SERVICE_KEY" > /home/gitlab-runner/gcloud-service-key.json
+      # Authenticate with Google Cloud using the key file
+      - gcloud auth activate-service-account --key-file=/home/gitlab-runner/gcloud-service-key.json
+      # Configure Docker to use gcloud for authentication
+      - gcloud auth configure-docker gcr.io
+    script:
+        # The following command creates the docker image
+        - docker build -t ${IMAGE_NAME}:${IMAGE_VERSION} -f DockerfileProd .
+
+      # Push the image to GKE's container registry if not already pushed
+        - docker tag ${IMAGE_NAME}:${IMAGE_VERSION} gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+        - docker push gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+
+        #remove the image after push to artifact registry
+        - docker rmi ${IMAGE_NAME}:${IMAGE_VERSION}
+        - docker rmi gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+    after_script:
+      # Recommended: Remove the image after push to artifact registry
+      - docker rmi ${IMAGE_NAME}:${IMAGE_VERSION}
+      - docker rmi gcr.io/${GKE_PROJECT_ID}/${IMAGE_NAME}:${IMAGE_VERSION}
+      - rm -f /home/gitlab-runner/.docker/config.json
+
+
+deploy_app_prod:
+  stage: deploy_prod
+  needs: [build-base-prod]
+  tags:
+    - ${PIPELINE_RUNNER_TAG}
+  only:
+    - prod
+  image: google/cloud-sdk:alpine
+  before_script:
+    # Decode and configure the GCloud service key
+    - echo $GCLOUD_SERVICE_KEY > ${CI_PROJECT_DIR}/gcloud-service-key.json
+    - gcloud auth activate-service-account --key-file=${CI_PROJECT_DIR}/gcloud-service-key.json
+    - gcloud config set project ${GKE_PROJECT_ID}
+
+    # Fetch GKE credentials
+    - gcloud container clusters get-credentials ${GKE_CLUSTER_NAME} --zone ${GKE_CLUSTER_ZONE} --project ${GKE_PROJECT_ID}
+  script:
+    - kubectl apply -f ${CI_PROJECT_DIR}/deployment/secrets.yaml -n ${PROD_KUBE_NAMESPACE}
+    # Replace the placeholder with the actual image tag
+    - sed -i "s|IMAGE_VERSION|${CI_COMMIT_SHORT_SHA}|g" ${CI_PROJECT_DIR}/deployment/deployment.yaml; kubectl apply -f ${CI_PROJECT_DIR}/deployment/deployment.yaml -n ${PROD_KUBE_NAMESPACE}
+
+  after_script:
+    - rm -f ${CI_PROJECT_DIR}/gcloud-service-key.json

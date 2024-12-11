@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app-deployment
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  strategy:
+    type: Recreate
+
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        # Application container
+        - name: app
+          image: gcr.io/high-age-441901-e5/app_cicd:IMAGE_VERSION
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_NAME
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_PASSWORD
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: DB_PORT
+            - name: GCS_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: GCS_PROJECT_ID
+            - name: GCS_PRIVATE_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: GCS_PRIVATE_KEY_ID
+            - name: GCS_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: GCS_PRIVATE_KEY
+            - name: GCS_CLIENT_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: GCS_CLIENT_EMAIL
+            - name: GCS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: GCS_CLIENT_ID
+            - name: ALLOWED_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: app-secrets
+                  key: ALLOWED_HOST
+
+        # Cloud SQL Proxy container
+        - name: cloud-sql-proxy
+          image: gcr.io/cloudsql-docker/gce-proxy:1.29.0
+          command: [ "/cloud_sql_proxy",
+                     "-instances=high-age-441901-e5:us-west1:cicd-final:cicd-final=tcp:3306",
+                     "-credential_file=/secrets/cloudsql/credentials.json" ]
+          volumeMounts:
+            - name: cloudsql-credentials
+              mountPath: /secrets/cloudsql
+              readOnly: true
+      volumes:
+        - name: cloudsql-credentials
+          secret:
+            secretName: cloudsql-instance-credentials
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app-service
+spec:
+  selector:
+    app: my-app
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: LoadBalancer

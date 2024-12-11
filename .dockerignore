@@ -1,0 +1,6 @@
+*.key
+*.env
+*.pem
+tests/
+mongodb_test.py
+.gitlab-ci.yml

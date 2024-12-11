@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  cloudsql-proxy:
+    container_name: cloudsql-proxy
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.5.0
+    command:  ${INSTANCE_ID} --credentials-file=/secrets/cloudsql/credentials.json --address 0.0.0.0 --port 3306
+    networks:
+      - backend-network
+    ports:
+      - 3306:3306
+    volumes:
+      - C:\Users\User\Downloads\cicd-finalcred\credentials.json:/secrets/cloudsql/credentials.json
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    depends_on:
+        - cloudsql-proxy
+    ports:
+        - "8000:8000"
+    networks:
+      - backend-network
+networks:
+  backend-network:
+    driver: bridge
